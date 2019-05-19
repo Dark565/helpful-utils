@@ -1,0 +1,253 @@
+#!/bin/bash
+
+# Script blocks/unblocks every connection in/outgoing a process
+
+# Copyright (C) 2019 Grzegorz Kociołek (Dark565)
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+
+# Default group used for network blocking
+DEFAULT_GROUP_ID=9483
+
+REGEX="^[0-9]*$"
+[[ -n $PUNISH_GROUP_ID && $PUNISH_GROUP_ID =~ $REGEX ]] && BLOCK_GROUP=$PUNISH_GROUP_ID || BLOCK_GROUP=$DEFAULT_GROUP_ID
+
+BLOCK_DIR="punish-block-$BLOCK_GROUP"
+
+ARG=$2
+
+usage() {
+	echo \
+"$0 [command] [arguments]...
+
+'allow <tid> [-t]' 	removes a task from the block group
+	-t		removes also all task's threads
+
+'allow-all'		removes all tasks from the block group
+
+'deny <tid> [-t]' 	adds a task to the block group
+	-t		adds also all task's threads
+
+'status <tid>' 		checks if a task is allowed or denied to access network
+
+'list [-tng]'	 	lists all blocked tasks
+	-t		shows master process [Tgid (PID)] of tasks
+	-n		shows names of tasks
+	-g		groups masters and tasks into space saving table
+
+'group-id'		shows task segregation group's id used for the firewall implementation;
+			id can be changed by an environment 'PUNISH_GROUP_ID';
+			group id must be integral;
+			default group id is '$DEFAULT_GROUP_ID'
+
+'prepare'		creates iptables rule if it isn't already set;
+			the rule is created automatically when you run 'deny' the first time,
+			but this helps you set it manually when you cleared it, for example, by 'clear'
+
+'clear' 		removes iptables rule created by this script
+
+Each rule changing command requires to be executed by the root.
+'list', 'status' and 'group-rule' are available for everyone.
+" >&2
+}
+
+check_rule() {
+	iptables -S | grep -e "$IPTABLES_RULE" -q
+}
+
+exit_on_nonroot() {
+	if [[ $(id -u) != 0 ]]; then
+		echo "You have to be the root!" >&2
+		exit 1
+	fi
+}
+
+nameof() { #tid
+	grep '^Name:' /proc/$1/status \
+		| cut -d'	' -f2
+}
+
+tgidof() { #tid
+
+	grep '^Tgid:' /proc/${LINE}/status \
+		| cut -d'	' -f2
+}
+
+print_task() { #tid, tid_name, pid, pid_name
+	local TID; local TID_NAME; local PID; local PID_NAME
+	local PRINT_TGID; local PRINT_NAME;
+	TID=$1; TID_NAME=$2; PID=$3; PID_NAME=$4;
+
+	if [[ -n $SHOW_TGID ]]; then
+		if [[ -z $PID ]]; then
+			PID="$(tgidof $TID)"
+		fi
+
+		if [[ -z $PID_NAME ]]; then
+			PID_NAME="$(nameof $PID)"
+		fi
+
+		PRINT_TGID=" @$PID [$PID_NAME]"
+	fi
+
+	if [[ -n $SHOW_NAMES ]]; then
+		if [[ -z $TID_NAME ]]; then
+			TID_NAME="$(nameof $TID)"
+		fi
+
+		PRINT_NAME=" [$TID_NAME]"
+	fi
+
+	printf "${TID}${PRINT_NAME}${PRINT_TGID}"
+
+}
+
+IPTABLES_RULE="-A INPUT -m cgroup --cgroup $BLOCK_GROUP -j DROP"
+
+# Move to cgroup control directory
+cd /sys/fs/cgroup/net_cls
+
+case $1 in
+	"list" )
+		cd "${BLOCK_DIR}"
+
+		echo "Blocked tasks:" >&2
+
+		for ((i=2;i<=$#;i++)); do
+			THIS_ARG="${!i}"
+			[[ ${THIS_ARG:0:1} == '-' ]] || continue
+			for ((j=1;j<$(wc -c <<< $THIS_ARG);j++)); do
+				case ${THIS_ARG:j:1} in
+					"t" )
+						SHOW_TGID=1
+						;;
+					"n" )
+						SHOW_NAMES=1
+						;;
+					"g" )
+						GROUP_TASKS=1
+						;;
+				esac
+			done
+		done
+		if [[ -z $SHOW_TGID && -z $SHOW_NAMES && -z $GROUP_TASKS ]]; then
+			cat 'tasks'
+			exit 0
+		fi
+
+		{
+
+		if [[ -n $GROUP_TASKS ]]; then
+
+			while read -r LINE; do
+
+				THIS_TGID="$(tgidof $LINE)"
+				TASKS_OF[THIS_TGID]+="$LINE "
+
+			done
+
+			for pid in ${!TASKS_OF[@]}; do
+
+				THIS_PID_NAME="$(nameof $pid)"
+				printf "$pid [${THIS_PID_NAME}]:\n"
+				for task in ${TASKS_OF[pid]}; do
+					printf "	- "; print_task ${task} '' ${pid} ${THIS_PID_NAME}; echo
+				done
+			done
+		else
+
+			while read -r LINE; do
+				print_task ${LINE} '' '' ''; echo
+			done
+
+		fi
+		
+		} < 'tasks'
+		
+		exit 0
+		;;
+	"clear" )
+		exit_on_nonroot
+
+		iptables -D ${IPTABLES_RULE:3} 2>/dev/null
+		exit $?
+		;;
+
+	"prepare" )
+		if ! check_rule; then
+			iptables $IPTABLES_RULE
+			exit 0
+		fi
+		exit 1
+		;;
+
+	"allow" )
+		exit_on_nonroot
+
+		FILE="tasks"
+		;;
+
+	"allow-all" )
+		exec 10>tasks
+		while read -r LINE; do
+			echo "$LINE" >&10
+		done < "${BLOCK_DIR}/tasks"
+		exec 10>&-
+		exit 0
+		;;
+
+
+	"deny" )
+		exit_on_nonroot
+
+		FILE="${BLOCK_DIR}/tasks"
+		
+		mkdir -p "${BLOCK_DIR}"
+		echo "${BLOCK_GROUP}" > "${BLOCK_DIR}/net_cls.classid"
+
+		if ! check_rule; then
+			iptables $IPTABLES_RULE
+		fi
+
+		;;
+	"status" )
+		grep -q -e "$ARG" "${BLOCK_DIR}/tasks" 2>/dev/null && STATUS="blocked" || STATUS="allowed"
+		echo "Task '$ARG' is $STATUS to access the internet."
+		exit 0
+		;;
+
+	"group-id" )
+		echo "$BLOCK_GROUP"
+		exit 0
+		;;
+	* )
+		usage
+		exit 1
+		;;
+esac
+
+exec 10>"$FILE"
+case $3 in
+	"-t" )
+		for i in $(ls /proc/${ARG}/task/); do
+			echo "$i" >&10
+		done
+		;;
+	* )
+		echo "$ARG" >&10
+		;;
+esac
+exec 10>&-
