@@ -60,7 +60,7 @@ usage() {
 'clear' 		removes iptables rule created by this script
 
 Each rule changing command requires to be executed by the root.
-'list', 'status' and 'group-rule' are available for everyone.
+'list', 'status' and 'group-id' are available for everyone.
 " >&2
 }
 
