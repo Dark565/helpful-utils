@@ -1,0 +1,137 @@
+#!/bin/bash
+
+# Copyright (C) 2020 Grzegorz Kociołek (Dark565)
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+# Get physical blocks of the file on the filesystem and copy their data to another file.
+# Requires permission to open a block file for reading.
+# This script may be useful when it is a need to get data of the encrypted (in the filesystem layer) file as-is, so in crypted form.
+
+# hdparm may not work on virtual block devices like zram, because hdparm uses HDIO_GETGEO and similar for checking disk information,
+# but these ioctl-s don't work on such devices.
+# Filefrag works fine on each device file I have tested, so I will add support of it in the future
+
+shopt -sq nocasematch
+
+die() {
+	echo "$@" >&2
+	exit 1
+}
+
+search_program() {
+	command -v "$1" &>/dev/null || die "Cannot find '$1' in the system"
+}
+
+help() {
+	die "${0##*/} [--no-preserve | --help, -h] INPUT OUTPUT"
+}
+
+case "$1" in
+	"--no-preserve" ) 
+		NO_PRESERVE=1
+		shift 1;;
+	"--help" | "-h" )
+		help;;
+	-- )
+		shift 1;;
+	-* )
+		die "Invalid command";;
+	* )
+		:;;
+esac
+
+[[ -z "$1" || -z "$2" ]] && die "Input or output not specified"
+
+search_program dd
+search_program hdparm
+
+read -rd '' BLOCK_WARNING <<'EOF'
+Are you sure you want to continue writing the output on the block device?
+It may be dangerous. Especially if it has a file system written on this.
+Confirm your decision (y/n):
+EOF
+
+INPUT="$1"
+OUTPUT="$2"
+
+for i in -; do
+	OUTPUT_STAT=$(stat -c "%F" -- "$OUTPUT" 2>/dev/null) || break
+	if [[ "${OUTPUT_STAT}" == "block special file" ]]; then
+		if [[ -z ${NO_PRESERVE} ]]; then
+			printf "${BLOCK_WARNING} "
+			read -r DECISION
+			[[ "${DECISION}" =~ y(es)? ]] || exit 1
+		fi
+		NO_APPEND=1
+	else
+		rm "${OUTPUT}"
+	fi
+
+done
+
+FS_DEVICE=$(df --output=source -- "${INPUT}" 2>/dev/null) || die "Cannot retrieve a file system of the input file"
+FS_DEVICE=${FS_DEVICE#*$'\n'}
+FILE_SIZE=$(stat -c %s -- "${INPUT}") || die "Cannot get a file size"
+FIBMAP=$(hdparm --fibmap "${INPUT}") || die "Cannot get file block map"
+BYTE_SECTOR_SIZE=${FIBMAP##*assuming }
+BYTE_SECTOR_SIZE=${BYTE_SECTOR_SIZE%% byte*}
+BEGINNING_LBA=${FIBMAP##*begins at LBA }
+BEGINNING_LBA=${BEGINNING_LBA%%;*}
+FS_BLOCK_SIZE=${FIBMAP##*blocksize }
+FS_BLOCK_SIZE=${FS_BLOCK_SIZE%%,*}
+FIBMAP=${FIBMAP##*sectors$'\n'}
+FIBMAP_LINES=$(wc -l <<< "${FIBMAP}")
+
+[[ -n ${DEBUG} ]] && ADDITIONAL_DD_FLAGS="status=progress"
+
+_BYTE_OFFSET=0
+_BEGIN_LBA=1
+_END_LBA=2
+_SECTORS=3
+
+do_dd() {
+	dd 	if="${FS_DEVICE}" \
+		of="${OUTPUT}" \
+		skip="${SKIP_OFFSET}" \
+		seek=${BL_INFO_ARRAY[_BYTE_OFFSET]} \
+		bs=${FS_BLOCK_SIZE} \
+		count=${COPY_BYTES} \
+		iflag=count_bytes,skip_bytes \
+		oflag=seek_bytes \
+		conv=notrunc \
+		${ADDITIONAL_DD_FLAGS}
+}
+
+echo "${FIBMAP}" | {
+	COPIED_BYTES=0
+	for ((i=1; i<${FIBMAP_LINES}; i++)); do
+		read -r BL_INFO
+		BL_INFO_ARRAY=(${BL_INFO})
+
+		SKIP_OFFSET=$(((${BL_INFO_ARRAY[_BEGIN_LBA]} - BEGINNING_LBA) * BYTE_SECTOR_SIZE))
+		COPY_BYTES=$((${BL_INFO_ARRAY[_SECTORS]} * BYTE_SECTOR_SIZE))
+
+		do_dd || die "Cannot copy the data"
+	done
+	read -r BL_INFO
+	BL_INFO_ARRAY=(${BL_INFO})
+
+	SKIP_OFFSET=$(((${BL_INFO_ARRAY[_BEGIN_LBA]} - BEGINNING_LBA) * BYTE_SECTOR_SIZE))
+	COPY_BYTES=$((FILE_SIZE - ${BL_INFO_ARRAY[_BYTE_OFFSET]}))
+
+	do_dd || die "Cannot copy the data"
+}
+
