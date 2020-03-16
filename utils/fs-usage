@@ -1,21 +1,5 @@
 #!/bin/bash
 
-# Copyright (C) 2020 Grzegorz Kociołek (Dark565)
-#
-#    This program is free software: you can redistribute it and/or modify
-#    it under the terms of the GNU General Public License as published by
-#    the Free Software Foundation, either version 3 of the License, or
-#    (at your option) any later version.
-#
-#    This program is distributed in the hope that it will be useful,
-#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-#    GNU General Public License for more details.
-#
-#    You should have received a copy of the GNU General Public License
-#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
-
-
 function help() {
 echo "\
  Usage: $(basename $0) [option]... mount
@@ -31,11 +15,11 @@ echo "\
 }
 
 function kill_num() {
-	kill -n "$1" "$2"
+	/bin/kill -n "$1" "$2"
 }
 
 function kill_name() {
-	kill -s "$1" "$2"
+	/bin/kill -s "$1" "$2"
 }
 
 function cmd() {
@@ -67,8 +51,54 @@ function resolve_fd_flags() {
 	esac
 }
 
+function print_pid_info() {
+	[[ -z ${FOUND} ]] || return 1
+	FOUND=1
+
+	local USERID="$(stat -c %u "/proc/${PID}")"
+	local USERNAME="$(id -un "${USERID}")"
+
+	printf "\n---  ${GREEN}${USERNAME} [${USERID}]${NOCOLOR}  ---\n"
+	printf "${GREEN}${PID}${NOCOLOR} ( $(readlink "/proc/${PID}/exe") )\n"
+
+	if [[ $KILL == 1 ]]; then
+		${KILL_FUNC} "${ARG_CMD}" "${PID}"
+
+	elif [[ $CMD == 1 ]]; then
+		cmd "${ARG_CMD}" "${PID}"
+	fi
+
+
+}
+
+# Try to read link with builtin functions.
+# If they will fail, try to call an external program.
+read_link() {
+	local link=$1
+	if cd -P "${link}" 2>/dev/null; then
+		READ_LINK="${PWD}"
+		cd - >/dev/null
+	elif ! READ_LINK=$(readlink -f "${link}"); then
+		return 1
+	fi
+}
+
+check_fs() {
+	local directory=$1
+	local check_for=$2
+
+	[[ $(fs_mount_from_path "${directory}") == ${check_for} ]]
+}
+
+check_fs_from_link() {
+	local link=$1
+	local check_for=$2
+
+	read_link "${link}"
+	check_fs "${READ_LINK}" "${check_for}"
+}
+
 # Check arguments
-START_FS=1 #FS argument
 case $1 in
 	"-h" | "--help" )
 		help 1
@@ -76,24 +106,29 @@ case $1 in
 		;;
 	"-k" | "--kill" )
 		KILL=1
-		START_FS=3
+		ARG_CMD=$2
 
-		if [[ $2 =~ '^[0-9]*$' ]]
+		if [[ $2 =~ ^[0-9]+$ ]]
 		then
 			KILL_FUNC=kill_num
 		else
 			KILL_FUNC=kill_name
 		fi
 
+		shift 2
+
 		;;
 	"-c" | "--command" )
 		CMD=1
-		START_FS=3
+		ARG_CMD=$2
+
+		shift 2
 		;;
 esac
 
+START_FS=${1} #FS argument
 # Get file system's mount point from the argument
-FS_PATH="$(fs_mount_from_path "${!START_FS}")"
+FS_PATH="$(fs_mount_from_path "${START_FS}")"
 if [[ ! $? -eq 0 ]]
 then
 	echo "$(basename $0): Error with reading file system from file" 1>&2
@@ -110,37 +145,22 @@ printf "${GREEN}These programs use this file system:${NOCOLOR}\n"
 # Get all processes using the file system and iterate through them
 for PID in $(fuser -m "${FS_PATH}" 2>/dev/null)
 do
+	cd "/proc/${PID}" 2>/dev/null || continue
 
-	cd "/proc/${PID}/fd" 2>/dev/null || continue
+	if check_fs_from_link cwd "${FS_PATH}" 2>/dev/null; then
+		print_pid_info
+		printf "${RED}->    	[pwd] ${NOCOLOR}${READ_LINK}\n"
+	fi
+
+	cd fd 2>/dev/null || continue
 	ls | while read -r LINK
 	do
-		READLINK=$(readlink "${LINK}" 2>/dev/null)
-		if [[ $(fs_mount_from_path "${READLINK}") == "${FS_PATH}" ]]
-		then
-
-			if [[ $FOUND != 1 ]]
-			then
-				FOUND=1
-	
-				USERID="$(stat -c %u "/proc/${PID}")"
-				USERNAME="$(id -un "${USERID}")"
-
-				printf "\n---  ${GREEN}${USERNAME} [${USERID}]${NOCOLOR}  ---\n"
-				printf "${GREEN}${PID}${NOCOLOR} ( $(readlink "/proc/${PID}/exe") )\n"
-
-				if [[ $KILL == 1 ]]
-				then
-					$KILL_FUNC "$2" "${PID}"
-
-				elif [[ $CMD == 1 ]]
-				then
-					cmd "$2" "${PID}"
-				fi
-			fi
-
+		if check_fs_from_link ${LINK} "${FS_PATH}" 2>/dev/null; then
+			print_pid_info
 			resolve_fd_flags "../fdinfo/${LINK}"
-			printf "${RED}-> ${ORANGE}${RESOLVED_FLAGS}${RED}	[${LINK}] ${NOCOLOR}${READLINK}\n"
-
+			printf "${RED}-> ${ORANGE}${RESOLVED_FLAGS}${RED}	[${LINK}] ${NOCOLOR}${READ_LINK}\n"
 		fi
 	done
+
+	unset FOUND
 done
