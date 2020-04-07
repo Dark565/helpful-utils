@@ -137,8 +137,8 @@ if [ -z $PRINT_STAR ]; then
 	read -r RX_NOW < "$INTERFACE_STAT_DIR/rx_bytes"
 	read -r TX_NOW < "$INTERFACE_STAT_DIR/tx_bytes"
 
-	RX_SPEED=$(((RX_NOW-RX_BEG)/5))
-	TX_SPEED=$(((TX_NOW-TX_BEG)/5))
+	RX_SPEED=$(((RX_NOW-RX_BEG)/SLEEP_TIME))
+	TX_SPEED=$(((TX_NOW-TX_BEG)/SLEEP_TIME))
 
 else
 	printf "[*] "
