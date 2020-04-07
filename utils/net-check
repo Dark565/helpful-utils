@@ -1,0 +1,160 @@
+#!/bin/bash
+
+# A script printing info about the main interface
+
+# Copyright (C) 2020 Grzegorz Kociołek (Dark565)
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Fast method of dividing a number by 10 - doesn't need an external program.
+function div10() {
+
+	local NUMBER="$1"
+	local DIV10="$2"
+	local PRECISION="$3"
+	if [ $NUMBER == 0 ]; then
+		printf 0
+		return 0
+	fi
+	if [[ $NUMBER -lt 0 ]]; then
+		((NUMBER=-NUMBER))
+		printf "-"
+	fi
+	if [ ${#NUMBER} -gt "$DIV10" ]; then
+		local SECOND_PART="${NUMBER:${#NUMBER}-DIV10:PRECISION}"
+		printf "${NUMBER:0:${#NUMBER}-DIV10}"
+		[ -z ${SECOND_PART#0*} ] && return 0
+		printf ".${SECOND_PART}"
+	else
+		printf "0"
+		if [ $PRECISION -gt 0 ]; then
+			local ZEROS_COUNT=$((DIV10-${#NUMBER}))
+			[[ $ZEROS_COUNT -ge $PRECISION ]] && return 0
+
+			printf "."
+			if [ $ZEROS_COUNT -gt 0 ]; then
+				for i in {1..$ZEROS_COUNT}; do
+					printf "0"
+				done
+			fi
+			printf "${NUMBER:0:PRECISION-ZEROS_COUNT}"
+		fi
+	fi
+
+}
+
+function div10_fixed() {
+	local NUM=$(div10 "$@")
+	[[ $NUM == '-0' ]] && printf "0" || printf "$NUM"
+}
+
+function div10_allow_positive() {
+	local NUMBER="$1"
+	[[ $NUMBER -lt 0 ]] && { printf "0"; return 1; }
+	div10 "$@"
+}
+
+# Print byte count in human readable format
+function humanReadableSizeConv() {
+
+	local NUMBER="$1"
+	local PRECISION="$2"
+	local FORCE_SIZE="$3"
+
+	if [[ 	$NUMBER -ge 1000000000000 && -z $FORCE_SIZE || $FORCE_SIZE == 'tb' ]]; then
+		div10 "$NUMBER" 12 "$PRECISION"
+		printf " TB"
+	elif [[ $NUMBER -ge 1000000000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'gb' ]]; then
+		div10 "$NUMBER" 9 "$PRECISION"
+		printf " GB"
+	elif [[ $NUMBER -ge 1000000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'mb' ]]; then
+		div10 "$NUMBER" 6 "$PRECISION"
+		printf " MB"
+	elif [[ $NUMBER -ge 1000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'kb' ]]; then
+		div10 "$NUMBER" 3 "$PRECISION"
+		printf " KB"
+	else
+		printf "$NUMBER B"
+	fi
+}
+
+SLEEP_TIME=5
+
+# Signal lines count
+[[ -z $1 ]] && LINES_COUNT=5 || LINES_COUNT=$1
+
+# Force size prefix
+SIZE_PREFIX=$2
+
+# Get default route interface
+DEFAULT_ROUTE_INTERFACE="$(ip route | grep 'default' | sed 's/^.* dev \([^ ]*\) .*/\1/')"
+INTERFACE_STAT_DIR="/sys/class/net/$DEFAULT_ROUTE_INTERFACE/statistics"
+
+if [ -z $DEFAULT_ROUTE_INTERFACE ]; then
+	echo "[x]"
+	sleep ${SLEEP_TIME}
+	exit 0
+fi
+
+PRINT_NAME=$DEFAULT_ROUTE_INTERFACE	
+
+WIRELESS_INFO="$(iw dev "$DEFAULT_ROUTE_INTERFACE" info 2>/dev/null)"
+
+if [ $? -eq 0 ]; then
+# Wireless
+	SSID="$(echo "$WIRELESS_INFO" | grep 'ssid' | sed -E 's/^.*ssid (.+).*/\1/')"
+	if [[ -n $SSID ]]; then
+		SCAN_NETWORK=1
+		PRINT_NAME=$SSID
+	else
+		PRINT_STAR=1
+	fi
+#else
+# non-wireless
+fi
+
+if [ -z $PRINT_STAR ]; then
+	PRINT_SPEED=1
+
+	read -r RX_BEG < "$INTERFACE_STAT_DIR/rx_bytes"
+	read -r TX_BEG < "$INTERFACE_STAT_DIR/tx_bytes"
+
+	TBEG=${TBEG/.}
+	TEND=${TEND/.}
+	sleep ${SLEEP_TIME}
+
+	read -r RX_NOW < "$INTERFACE_STAT_DIR/rx_bytes"
+	read -r TX_NOW < "$INTERFACE_STAT_DIR/tx_bytes"
+
+	RX_SPEED=$(((RX_NOW-RX_BEG)/5))
+	TX_SPEED=$(((TX_NOW-TX_BEG)/5))
+
+else
+	printf "[*] "
+	sleep ${SLEEP_TIME}
+fi
+
+printf "$PRINT_NAME"
+
+if [ -n $PRINT_SPEED ]; then
+	printf " (↓"; humanReadableSizeConv $RX_SPEED 2 $SIZE_PREFIX; printf "/s | ↑"; humanReadableSizeConv $TX_SPEED 2 $SIZE_PREFIX; printf "/s)"
+fi
+
+printf "\n"
+
+
+
+
+
+
