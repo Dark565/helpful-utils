@@ -1,0 +1,249 @@
+#!/bin/bash
+
+# A script printing info about the main interface
+
+# Copyright (C) 2020 Grzegorz Kociołek (Dark565)
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+# Fast method of dividing a number by 10 - doesn't need an external program.
+function div10() {
+
+	local NUMBER="$1"
+	local DIV10="$2"
+	local PRECISION="$3"
+	if [ $NUMBER == 0 ]; then
+		printf 0
+		return 0
+	fi
+	if [[ $NUMBER -lt 0 ]]; then
+		((NUMBER=-NUMBER))
+		printf "-"
+	fi
+	if [ ${#NUMBER} -gt "$DIV10" ]; then
+		local SECOND_PART="${NUMBER:${#NUMBER}-DIV10:PRECISION}"
+		printf "${NUMBER:0:${#NUMBER}-DIV10}"
+		[ -z ${SECOND_PART#0*} ] && return 0
+		printf ".${SECOND_PART}"
+	else
+		printf "0"
+		if [ $PRECISION -gt 0 ]; then
+			local ZEROS_COUNT=$((DIV10-${#NUMBER}))
+			[[ $ZEROS_COUNT -ge $PRECISION ]] && return 0
+
+			printf "."
+			if [ $ZEROS_COUNT -gt 0 ]; then
+				for i in {1..$ZEROS_COUNT}; do
+					printf "0"
+				done
+			fi
+			printf "${NUMBER:0:PRECISION-ZEROS_COUNT}"
+		fi
+	fi
+
+}
+
+function div10_fixed() {
+	local NUM=$(div10 "$@")
+	[[ $NUM == '-0' ]] && printf "0" || printf "$NUM"
+}
+
+function div10_allow_positive() {
+	local NUMBER="$1"
+	[[ $NUMBER -lt 0 ]] && { printf "0"; return 1; }
+	div10 "$@"
+}
+
+# Print byte count in human readable format
+function humanReadableSizeConv() {
+
+	local NUMBER="$1"
+	local PRECISION="$2"
+	local FORCE_SIZE="$3"
+
+	if [[ 	$NUMBER -ge 1000000000000 && -z $FORCE_SIZE || $FORCE_SIZE == 'tb' ]]; then
+		div10 "$NUMBER" 12 "$PRECISION"
+		printf " TB"
+	elif [[ $NUMBER -ge 1000000000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'gb' ]]; then
+		div10 "$NUMBER" 9 "$PRECISION"
+		printf " GB"
+	elif [[ $NUMBER -ge 1000000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'mb' ]]; then
+		div10 "$NUMBER" 6 "$PRECISION"
+		printf " MB"
+	elif [[ $NUMBER -ge 1000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'kb' ]]; then
+		div10 "$NUMBER" 3 "$PRECISION"
+		printf " KB"
+	else
+		printf "$NUMBER B"
+	fi
+}
+
+help() {
+	echo "Usage: $0 [-s seconds] [-p prefix] [--only-download|--only-upload|--only-name] [--show-name]" >&2
+}
+
+function check_number() {
+	[[ $1 =~ ^(0|[1-9][0-9]*)$ ]] || die "$2"
+}
+
+down_start() {
+	[[ -n $SHOW_DOWN ]] || return 1
+
+	read -r RX_BEG < "$INTERFACE_STAT_DIR/rx_bytes"
+}
+
+up_start() {
+	[[ -n $SHOW_UP ]] || return 1
+
+	read -r TX_BEG < "$INTERFACE_STAT_DIR/tx_bytes"
+}
+
+down_end() {
+	[[ -n $SHOW_DOWN ]] || return 1
+
+	read -r RX_NOW < "$INTERFACE_STAT_DIR/rx_bytes"
+	RX_SPEED=$(((RX_NOW-RX_BEG)/SLEEP_TIME))
+}
+
+up_end() {
+	[[ -n $SHOW_UP ]] || return 1
+
+	read -r TX_NOW < "$INTERFACE_STAT_DIR/tx_bytes"
+	TX_SPEED=$(((TX_NOW-TX_BEG)/SLEEP_TIME))
+}
+
+show_name() {
+	[[ -n $ONLY_NAME ]] || return 1
+
+	echo "${PRINT_NAME:0:-1}"
+	exit 0
+}
+
+
+SLEEP_TIME=5
+SIZE_PREFIX=
+
+RX_SPEED=0
+TX_SPEED=0
+
+SHOW_DOWN=1
+SHOW_UP=1
+SHOW_NAME=1
+DETECT_STATS=1
+A_SHOW_NAME=
+ONLY_NAME=
+while [[ -n $1 ]]; do
+	case "$1" in
+	'-s' )
+		check_number "$2" || die "Invalid sleep time"
+		SLEEP_TIME=$2
+
+		shift 1
+		;;
+
+	'-p' )
+		[[ $2 =~ ^[kmgt]?b$ ]] || die "Invalid prefix"
+		SIZE_PREFIX=$2
+
+		shift 1
+		;;
+
+	'--only-download' )
+		SHOW_UP=
+		SHOW_DOWN=1
+		SHOW_NAME=
+		;;
+	'--only-upload' )
+		SHOW_DOWN=
+		SHOW_UP=1
+		SHOW_NAME=
+		;;
+
+	'--only-name' )
+		ONLY_NAME=1
+		;;
+
+	'--show-name' )
+		A_SHOW_NAME=1
+		;;
+
+	* )
+		help
+		exit 1
+		;;
+	esac
+	shift 1
+done
+
+[[ -n $A_SHOW_NAME ]] && SHOW_NAME=${A_SHOW_NAME}
+
+# Get default route interface
+DEFAULT_ROUTE_INTERFACE="$(ip route | grep 'default' | sed 's/^.* dev \([^ ]*\) .*/\1/')"
+INTERFACE_STAT_DIR="/sys/class/net/$DEFAULT_ROUTE_INTERFACE/statistics"
+
+if [[ -z $DEFAULT_ROUTE_INTERFACE ]]; then
+	PRINT_NAME="[x] "
+	show_name
+	sleep ${SLEEP_TIME}
+else
+	WIRELESS_INFO="$(iw dev "$DEFAULT_ROUTE_INTERFACE" info 2>/dev/null)"
+
+	if [[ $? -eq 0 ]]; then
+	# Wireless
+		SSID="$(echo "$WIRELESS_INFO" | grep 'ssid' | sed -E 's/^.*ssid (.+).*/\1/')"
+		if [[ -n $SSID ]]; then
+			PRINT_NAME="$SSID "
+			show_name
+		else
+			DETECT_STATS=
+			PRINT_NAME="[*] "
+			show_name
+			sleep $SLEEP_TIME
+		fi
+
+	else
+	# Non-wireless
+		PRINT_NAME="$DEFAULT_ROUTE_INTERFACE "
+		show_name
+
+	fi
+
+	if [[ -n $DETECT_STATS ]]; then
+		down_start
+		up_start
+
+		TBEG=${TBEG/.}
+		TEND=${TEND/.}
+
+		sleep $SLEEP_TIME
+
+		down_end
+		up_end
+	fi
+fi
+
+[[ -n $SHOW_NAME ]] && printf "$PRINT_NAME("
+[[ -n $SHOW_DOWN ]] && { printf "↓"; humanReadableSizeConv $RX_SPEED 2 $SIZE_PREFIX; }
+if [[ -n $SHOW_UP ]]; then
+	[[ -n $SHOW_DOWN ]] && printf " | "
+	printf "↑"; humanReadableSizeConv "$TX_SPEED" 2 $SIZE_PREFIX
+fi
+[[ -n $SHOW_NAME ]] && printf ")"
+printf "\n"
+
+
+
+
+
+
