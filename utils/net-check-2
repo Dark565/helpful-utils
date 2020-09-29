@@ -89,6 +89,11 @@ function humanReadableSizeConv() {
 	fi
 }
 
+die() {
+	echo "$*" >&2
+	exit 1
+}
+
 help() {
 	echo "Usage: $0 [-s seconds] [-p prefix] [--only-download|--only-upload|--only-name] [--show-name]" >&2
 }
@@ -137,10 +142,10 @@ SIZE_PREFIX=
 RX_SPEED=0
 TX_SPEED=0
 
+DETECT_STATS=1
 SHOW_DOWN=1
 SHOW_UP=1
 SHOW_NAME=1
-DETECT_STATS=1
 A_SHOW_NAME=
 ONLY_NAME=
 while [[ -n $1 ]]; do
