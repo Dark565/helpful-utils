@@ -1,0 +1,172 @@
+#!/bin/bash
+
+# Copyright (C) 2020 Grzegorz Kociołek (Dark565)
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+# Get GPU statistics
+
+CACHE_DIR="/tmp/gpu-usage"
+CACHE_NOIND_LNK="${CACHE_DIR}/link-any"
+CACHE_DRIVR_LNK="${CACHE_DIR}/link-"
+
+tty -s || exec 2>/dev/null
+
+prepare_cache() {
+	mkdir -p "${CACHE_DIR}" || error_handler "Cannot create a cache"
+}
+
+error() {
+	echo "Error: $@" >&2
+}
+
+[[ $4 == "nofail" ]] && FAIL_STATUS=0 || FAIL_STATUS=1
+error_handler() {
+	[[ -n "$@" ]] && error "$@"
+	echo "NaN"
+	exit ${FAIL_STATUS}
+}
+
+usage() {
+	echo "Usage: ${0##*/} <driver> <attribute> [card-index]"
+	echo
+	echo "'driver' is a name of a driver whose card's attribute we want to examine."
+	echo "  Can be any or -, to select a driver automatically."
+	echo
+	echo "'attribute' can be 'temp', 'usage', 'fan-speed', 'power', 'mem-usage'."
+	echo
+	echo "'card-index' is an index of GPU. Leave empty or - to select automatically."
+	echo "  Note that, 'card-index' works only if you selectd 'any' or '-' as a driver."
+	echo
+	echo "Copyright (C) 2020 Grzegorz Kociołek (Dark565)."
+	echo
+}
+
+case "$1" in
+	- )
+		;;
+	-* )
+		usage >&2
+		exit 1
+		;;
+	* )
+		;;
+esac
+
+DRIVER_CHECK_REGEX='^(any|-|)$'
+CARD_CHECK_REGEX='^[0-9]+$'
+WHAT_CHECK_REGEX='^temp|usage|fan-speed|power$'
+
+info_files["temp"]="hwmon"
+info_files["usage"]="gpu_busy_percent"
+info_files["fan-speed"]="hwmon"
+info_files["power"]="hwmon"
+info_files["mem-usage"]="mem_info_vram_total"
+
+get_info() {
+	case "${WHAT}" in
+		"temp" )
+			local TEMP
+			cd hwmon/hwmon*
+			TEMP=$(< temp1_input) || error_handler
+			(( TEMP /= 1000 ))
+
+			echo "${TEMP}°C"
+			;;
+
+		"usage" )
+			local PERCENT
+			PERCENT=$(< gpu_busy_percent) || error_handler
+
+			echo "${PERCENT}%"
+			;;
+
+		"fan-speed" )
+			local SPEED
+			cd hwmon/hwmon*
+			SPEED=$(< fan1_input) || error_handler
+
+			echo "${SPEED} rpm"
+			;;
+		"power" )
+			local MICROWATTS
+			cd hwmon/hwmon*
+			MICROWATTS=$(< power1_average) || error_handler
+
+			echo "$((MICROWATTS / 1000000)) W"
+			;;
+		"mem-usage" )
+			local MEM_MAX MEM_CUR MEM_PERCENT
+			MEM_CUR=$(< mem_info_vram_used)
+			MEM_MAX=$(< mem_info_vram_total)
+
+			MEM_PERCENT=$((MEM_CUR*100/MEM_MAX))
+			echo "${MEM_PERCENT}%"
+			;;
+		* )
+			error_handler "invalid request"
+			;;
+	esac
+}
+
+USE_SPECIFIC_DRIVER="$1"
+WHAT="$2"
+
+[[ ${WHAT} =~ ${WHAT_CHECK_REGEX} ]] || error_handler "Not a valid attribute. Check -h"
+
+trap error_handler ERR
+
+if ! [[ ${USE_SPECIFIC_DRIVER} =~ ${DRIVER_CHECK_REGEX} ]]; then
+	CACHE_THIS_DRIVER_LNK=${CACHE_DRIVR_LNK}${USE_SPECIFIC_DRIVER}
+
+	if [[ ! -L ${CACHE_THIS_DRIVER_LNK} ]]; then
+		prepare_cache
+		for path in /sys/class/drm/card*/device/; do
+			cd ${path}
+			driver_path=$(readlink driver; true)
+			if [[ ${driver_path##*/} == ${USE_SPECIFIC_DRIVER} ]]; then
+				ln -s "${path}" "${CACHE_THIS_DRIVER_LNK}" 2>/dev/null || error_handler "Cannot create a symbolic link to the ${USE_SPECIFIC_DRIVER} DRI device"
+				get_info
+				exit $?
+			fi
+		done
+		error_handler "cannot find any gpu with driver: ${USE_SPECIFIC_DRIVER}"
+	else
+		CARD="${CACHE_THIS_DRIVER_LNK}"
+	fi
+else
+	[[ $3 =~ ${CARD_CHECK_REGEX} ]] && CARD="/sys/class/drm/card$3/device" || CARD='-'
+	if [[ ${CARD} == '-' ]]; then
+
+		if [[ ! -L ${CACHE_NOIND_LNK} ]]; then
+			prepare_cache
+
+			for i in /sys/class/drm/card*/device/; do
+				cd ${i}
+				INFO_FILE=${info_files[${WHAT}]}
+				[[ -r ${INFO_FILE} ]] || continue
+
+				ln -s "${i}" "${CACHE_NOIND_LNK}" 2>/dev/null || error_handler "Cannot create a symbolic link to the DRI device"
+				get_info
+				exit $?
+			done
+			error_handler "None of GPUs in system fulfills '${WHAT}' requirement: none has '${info_files[${WHAT}]}'"
+		else
+			CARD="${CACHE_NOIND_LNK}"
+		fi
+	fi
+fi
+cd ${CARD}
+get_info
