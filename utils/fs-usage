@@ -1,6 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# Copyright (C) 2020 Grzegorz Kociołek (Dark565)
+# Copyright (C) 2022 Grzegorz Kociołek (Dark565)
 #
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
@@ -15,27 +15,32 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+shopt -s extglob
 
 function help() {
 echo "\
- Usage: $(basename $0) [option]... mount
- -h,--help			Show this help;
- -p,--pid-only			List only pids without a list of open files;
- -nc,--nocolors			Don't print colors;
+Usage: ${0##*/} [OPTION]... [PATH]
+List processes with files open on a filesystem within PATH.
 
- -k,--kill SIGNAL		Send a SIGNAL to each detected process.
-				Signal is presented by appropiate number or name (eg. SIGTERM or 15)
-				List of available signals can be displayed with 'kill -l' command;
+With no PATH specified, treat it as the current working directory.
 
- -c,--command COMMAND		Execute a COMMAND with the process pid as the argument."
+  -h,--help                        Show this help.
+  --color=[always,never,auto]      Choose whether print colors always, never or automatically
+                                   (yes if STDOUT is a terminal, no if not).
+
+  -k,--kill=SIGNAL                 Send SIGNAL to each detected process.
+                                   Signal is presented by appropiate number or name (eg. SIGTERM or 15)
+                                   List of available signals can be displayed with 'kill -l' command;
+
+  -c,--command=COMMAND             Execute COMMAND with the process pid as the argument."
 }
 
 function kill_num() {
-	/bin/kill -n "$1" "$2"
+	kill -n "$1" "$2"
 }
 
 function kill_name() {
-	/bin/kill -s "$1" "$2"
+	kill -s "$1" "$2"
 }
 
 function cmd() {
@@ -59,7 +64,7 @@ function fs_mount_from_path() {
 function resolve_fd_flags() {
 	local info_array flags
 	readarray -n2 info_array <"$1"
-	printf -v flags ${info_array[1]#*:}
+	flags=${info_array[1]#*:}
 	case $((${flags} & 0x3)) in
 		2 ) RESOLVED_FLAGS="r+w";;
 		1 ) RESOLVED_FLAGS="w  ";;
@@ -74,8 +79,8 @@ function print_pid_info() {
 	local USERID="$(stat -c %u "/proc/${PID}")"
 	local USERNAME="$(id -un "${USERID}")"
 
-	printf "\n---  ${GREEN}${USERNAME} [${USERID}]${NOCOLOR}  ---\n"
-	printf "${GREEN}${PID}${NOCOLOR} ( $(readlink "/proc/${PID}/exe") )\n"
+	echo -en "\n---  ${GREEN}${USERNAME} [${USERID}]${NOCOLOR}  ---\n"
+	echo -en "${GREEN}${PID}${NOCOLOR} ( $(readlink "/proc/${PID}/exe") )\n"
 
 	if [[ $KILL == 1 ]]; then
 		${KILL_FUNC} "${ARG_CMD}" "${PID}"
@@ -114,35 +119,110 @@ check_fs_from_link() {
 	check_fs "${READ_LINK}" "${check_for}"
 }
 
+# If tty, turn on colors, otherwise turn off
+
+GREEN="\e[1;32m"
+RED="\e[1;31m"
+ORANGE="\e[1;33m"
+NOCOLOR="\e[0m" 
+
+get_long_opt() {
+	arg2=${1#*=}
+	if [ "$arg2" = "$1" ]; then
+		arg2=$2
+		return 0
+	fi
+	return 1
+}
+
+get_short_opt() {
+	arg2=${1:2}
+	if [ -z "$arg2" ]; then
+		arg2=$2
+		return 0
+	fi
+	return 1
+}
+
+get_short_or_long_opt() {
+	if [ "${1:0:2}" == "--" ]; then
+		get_long_opt "$@"
+	else
+		get_short_opt "$@"
+	fi
+}
+
+zero_colors() {
+	GREEN=
+	RED=
+	ORANGE=
+	NOCOLOR=
+}
+
+
 # Check arguments
-case $1 in
-	"-h" | "--help" )
-		help 1
-		exit 0
-		;;
-	"-k" | "--kill" )
-		KILL=1
-		ARG_CMD=$2
+while [[ -n $1 ]]; do
+	case $1 in
+		-h* | --help?(=*) )
+			help
+			exit 0
+			;;
+		-k* | --kill?(=*) )
+			get_short_or_long_opt "$@" && shift
 
-		if [[ $2 =~ ^[0-9]+$ ]]
-		then
-			KILL_FUNC=kill_num
-		else
-			KILL_FUNC=kill_name
-		fi
+			KILL=1
+			ARG_CMD=$arg2
 
-		shift 2
+			if [[ $arg2 =~ ^[0-9]+$ ]]
+			then
+				KILL_FUNC=kill_num
+			else
+				KILL_FUNC=kill_name
+			fi
+			;;
+		--color?(=*) )
+			get_long_opt "$@" && shift
+			
+			case $arg2 in
+				auto )
+					;;
+				always )
+					COLOR_FLAG_SPECIFIED=1
+					;;
+				never )
+					zero_colors
+					COLOR_FLAG_SPECIFIED=1
+					;;
+				* )
+					echo "-- Invalid color mode --" >&2
+					help
+					exit 1
+					;;
+			esac
+			;;
+		-c* | --command?(=*) )
+			get_short_or_long_opt "$@" && shift
 
-		;;
-	"-c" | "--command" )
-		CMD=1
-		ARG_CMD=$2
+			CMD=1
+			ARG_CMD=$arg2
+			;;
+		-* )
+			echo "-- Invalid flag --" >&2
+			help
+			exit 1
+			;;
+		* )
+			break
+			;;
+	esac
+	shift 1
+done
 
-		shift 2
-		;;
-esac
+if [[ -z $COLOR_FLAG_SPECIFIED ]]; then
+	tty -s <&1 || zero_colors
+fi
 
-START_FS=${1} #FS argument
+START_FS=${1:-.} #FS argument
 # Get file system's mount point from the argument
 FS_PATH="$(fs_mount_from_path "${START_FS}")"
 if [[ ! $? -eq 0 ]]
@@ -151,13 +231,6 @@ then
 	exit 1
 fi
 
-GREEN="\e[1;32m"
-RED="\e[1;31m"
-ORANGE="\e[1;33m"
-NOCOLOR="\e[0m"
-
-printf "${GREEN}These programs use this file system:${NOCOLOR}\n"
-
 # Get all processes using the file system and iterate through them
 for PID in $(fuser -m "${FS_PATH}" 2>/dev/null)
 do
@@ -165,7 +238,7 @@ do
 
 	if check_fs_from_link cwd "${FS_PATH}" 2>/dev/null; then
 		print_pid_info
-		printf "${RED}->    	[pwd] ${NOCOLOR}${READ_LINK}\n"
+		echo -en "${RED}->      [pwd] ${NOCOLOR}${READ_LINK}\n"
 	fi
 
 	cd fd 2>/dev/null || continue
@@ -174,7 +247,7 @@ do
 		if check_fs_from_link ${LINK} "${FS_PATH}" 2>/dev/null; then
 			print_pid_info
 			resolve_fd_flags "../fdinfo/${LINK}"
-			printf "${RED}-> ${ORANGE}${RESOLVED_FLAGS}${RED}	[${LINK}] ${NOCOLOR}${READ_LINK}\n"
+			printf -- "${RED}-> ${ORANGE}%-3s${RED}  [${LINK}] ${NOCOLOR}${READ_LINK}\n" "${RESOLVED_FLAGS}"
 		fi
 	done
 
