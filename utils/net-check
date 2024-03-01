@@ -1,8 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-# A script printing info about the main interface
-
-# Copyright (C) 2020 Grzegorz Kociołek (Dark565)
+# Copyright (C) 2020-2022 Grzegorz Kociołek (Dark565)
 #
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
@@ -17,144 +15,310 @@
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-# Fast method of dividing a number by 10 - doesn't need an external program.
-function div10() {
+# A script printing info about utilization of the default route interface
 
-	local NUMBER="$1"
-	local DIV10="$2"
-	local PRECISION="$3"
-	if [ $NUMBER == 0 ]; then
+export LC_ALL=C
+
+DEFAULT_DELAY=1
+
+read -r -d '\0' USAGE_STR <<EOF
+Usage: $0 [-hwp] [-i IFACE] [-d DELAY]
+Show utilization statistics for an interface.
+
+Options:
+  -h, --help             Show this help text;
+  -w, --wired            Don't treat an interface as wireless;
+  -p, --polybar          Format the output with special hypertext intended for Polybar;
+  -i, --interface IFACE  Select an interface (default: \`default' route's interface);
+  -d, --delay DELAY      Delay in seconds between counting (default: $DEFAULT_DELAY);
+
+It is possible to select multiple interfaces for the \`-i' option using the IFACE0:IFACE1... syntax.
+In this case, statistics for them are summed and the IFACE0:IFACE1... pattern is used as the interface name.
+This behavior is also assumed by default if the \`default' route is found to be
+nexthop-ped (backed by multiple gateways).
+EOF
+
+warn() {
+	echo "$0: $*" >&2
+}
+
+die() {
+	warn "$*"
+	exit 1
+}
+
+# Fast method of dividing a number by 10 - doesn't need an external program.
+div10() {
+
+	local number="$1"
+	local div10="$2"
+	local precision="$3"
+	if [ $number == 0 ]; then
 		printf 0
 		return 0
 	fi
-	if [[ $NUMBER -lt 0 ]]; then
-		((NUMBER=-NUMBER))
+	if [[ $number -lt 0 ]]; then
+		((number=-number))
 		printf "-"
 	fi
-	if [ ${#NUMBER} -gt "$DIV10" ]; then
-		local SECOND_PART="${NUMBER:${#NUMBER}-DIV10:PRECISION}"
-		printf "${NUMBER:0:${#NUMBER}-DIV10}"
-		[ -z ${SECOND_PART#0*} ] && return 0
-		printf ".${SECOND_PART}"
+	if [ ${#number} -gt "$div10" ]; then
+		local second_part="${number:${#number}-div10:precision}"
+		printf "${number:0:$((${#number}-div10))}"
+		[ -z ${second_part#0*} ] && return 0
+		printf ".${second_part}"
 	else
 		printf "0"
-		if [ $PRECISION -gt 0 ]; then
-			local ZEROS_COUNT=$((DIV10-${#NUMBER}))
-			[[ $ZEROS_COUNT -ge $PRECISION ]] && return 0
+		if [ $precision -gt 0 ]; then
+			local zeros_count=$((div10-${#number}))
+			[[ $zeros_count -ge $precision ]] && return 0
 
 			printf "."
-			if [ $ZEROS_COUNT -gt 0 ]; then
-				for i in {1..$ZEROS_COUNT}; do
+			if [ $zeros_count -gt 0 ]; then
+				for i in {1..$zeros_count}; do
 					printf "0"
 				done
 			fi
-			printf "${NUMBER:0:PRECISION-ZEROS_COUNT}"
+			printf "${number:0:precision-zeros_count}"
 		fi
 	fi
-
 }
 
-function div10_fixed() {
-	local NUM=$(div10 "$@")
-	[[ $NUM == '-0' ]] && printf "0" || printf "$NUM"
+div10_fixed() {
+	local num=$(div10 "$@")
+	[[ $num == '-0' ]] && printf "0" || printf "$num"
 }
 
-function div10_allow_positive() {
-	local NUMBER="$1"
-	[[ $NUMBER -lt 0 ]] && { printf "0"; return 1; }
+div10_allow_positive() {
+	local number="$1"
+	[[ $number -lt 0 ]] && { printf "0"; return 1; }
 	div10 "$@"
 }
 
 # Print byte count in human readable format
-function humanReadableSizeConv() {
+human_readable_size_conv() {
 
-	local NUMBER="$1"
-	local PRECISION="$2"
-	local FORCE_SIZE="$3"
+	local number="$1"
+	local precision="$2"
+	local force_size="$3"
 
-	if [[ 	$NUMBER -ge 1000000000000 && -z $FORCE_SIZE || $FORCE_SIZE == 'tb' ]]; then
-		div10 "$NUMBER" 12 "$PRECISION"
+	if [[ 	$number -ge 1000000000000 && -z $force_size || $force_size == 'tb' ]]; then
+		div10 "$number" 12 "$precision"
 		printf " TB"
-	elif [[ $NUMBER -ge 1000000000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'gb' ]]; then
-		div10 "$NUMBER" 9 "$PRECISION"
+	elif [[ $number -ge 1000000000 	  && -z $force_size || $force_size == 'gb' ]]; then
+		div10 "$number" 9 "$precision"
 		printf " GB"
-	elif [[ $NUMBER -ge 1000000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'mb' ]]; then
-		div10 "$NUMBER" 6 "$PRECISION"
+	elif [[ $number -ge 1000000 	  && -z $force_size || $force_size == 'mb' ]]; then
+		div10 "$number" 6 "$precision"
 		printf " MB"
-	elif [[ $NUMBER -ge 1000 	  && -z $FORCE_SIZE || $FORCE_SIZE == 'kb' ]]; then
-		div10 "$NUMBER" 3 "$PRECISION"
+	elif [[ $number -ge 1000 	  && -z $force_size || $force_size == 'kb' ]]; then
+		div10 "$number" 3 "$precision"
 		printf " KB"
 	else
-		printf "$NUMBER B"
+		printf "$number B"
 	fi
 }
 
-SLEEP_TIME=5
+route_get_nics() {
+	ip route show "$1" \
+		| grep '\sdev\s\+\w\+' \
+		| sed 's/.*\sdev\s\+\(\w\+\).*/\1/' \
+		| sed -z 's/\n\(.\)/:\1/g'
+}
 
-# Signal lines count
-[[ -z $1 ]] && LINES_COUNT=5 || LINES_COUNT=$1
+# in:
+#  global IFACE_ARR: array
+# returns:
+#  0: success
+#  1: error
+#  2: no interface
+check_nics() {
+	local iface
+	#eval local tmp="(\"\${$1[@]}\")"
+	#test -z "$tmp" && return 2
+	test -z "$IFACE_ARR" && return 2
 
-# Force size prefix
-SIZE_PREFIX=$2
+	for iface in "${IFACE_ARR[@]}"; do
+		if ! test -r "/sys/class/net/$iface/statistics"; then
+			warn "$iface: invalid interface"
+			return 1
+		fi
+	done
 
-# Get default route interface
-DEFAULT_ROUTE_INTERFACE="$(ip route | grep 'default' | sed 's/^.* dev \([^ ]*\) .*/\1/')"
-INTERFACE_STAT_DIR="/sys/class/net/$DEFAULT_ROUTE_INTERFACE/statistics"
+	return 0
+}
 
-if [ -z $DEFAULT_ROUTE_INTERFACE ]; then
-	echo "[x]"
-	sleep ${SLEEP_TIME}
-	exit 0
-fi
+# in:
+#  global IFACE_ARR: array
+#  global NO_WIRELESS: int
+# out:
+#  global WIRELESS_INFO: [string]
+# returns:
+# 0: true
+# 1: false
+check_for_wireless() {
+	local tmp
+	unset WIRELESS_INFO
 
-PRINT_NAME=$DEFAULT_ROUTE_INTERFACE	
+	test -z "$NO_WIRELESS" && test ${#IFACE_ARR[@]} -eq 1 || return 1
+	tmp=$(iw dev "$IFACE" info 2>/dev/null) && WIRELESS_INFO=$tmp
+}
 
-WIRELESS_INFO="$(iw dev "$DEFAULT_ROUTE_INTERFACE" info 2>/dev/null)"
+# in:
+#  global WIRELESS_INFO: string
+#  global LB_*: string
+# out:
+#  global PRINT_NAME: string
+# returns:
+# 0: true
+# 1: false
+obtain_wireless_name() {
+	local ssid ssid2
+	ssid=${WIRELESS_INFO#*$'\n'}
+	ssid2=${ssid#*ssid}
+	test "$ssid" = "$ssid2" && return 1
 
-if [ $? -eq 0 ]; then
-# Wireless
-	SSID="$(echo "$WIRELESS_INFO" | grep 'ssid' | sed -E 's/^.*ssid (.+).*/\1/')"
-	if [[ -n $SSID ]]; then
-		SCAN_NETWORK=1
-		PRINT_NAME=$SSID
+	ssid2=${ssid2# }
+	ssid2=${ssid2%%$'\n'*}
+	PRINT_NAME="${LB_COL_LIGHTBLUE}${ssid2}${LB_COL_WHITE}"
+}
+
+# in:
+#  global DELAY: int
+#  1: string - message
+#  [2]: int  - an exit value
+status_err() {
+	echo "$1"
+	sleep "$DELAY"
+	exit ${2:-0}
+}
+
+# in:
+#  global LB_*: string
+#  global DELAY: int
+#  1: string - a symbol
+#  [2]: int  - an exit value
+status_conn_err() {
+	status_err "${LB_ACTION_RECONNECT}${LB_COL_RED}[$1]${LB_ACTION_END}"
+}
+
+traffic_read() {
+	local iface
+	local rx tx
+	RX_TRAFFIC=0
+	TX_TRAFFIX=0
+	for iface in "${IFACE_ARR[@]}"; do
+		read rx </sys/class/net/"$iface"/statistics/rx_bytes
+		read tx </sys/class/net/"$iface"/statistics/tx_bytes
+		((RX_TRAFFIC+=$rx))
+		((TX_TRAFFIX+=$tx))
+	done
+}
+
+# in:
+#  global IFACE_ARR
+#  global DELAY
+# out:
+#  global RX_TRAFFIC: int
+#  global TX_TRAFFIC: int
+obtain_util() {
+	local iface
+	local old_rx old_tx rx_delta tx_delta
+	traffic_read
+	old_rx=$RX_TRAFFIC
+	old_tx=$TX_TRAFFIX
+	sleep "$DELAY"
+	traffic_read
+
+	rx_delta=$(($RX_TRAFFIC-$old_rx))
+	tx_delta=$(($TX_TRAFFIX-$old_tx))
+
+	RX_UTIL=$(($rx_delta/$DELAY))
+	TX_UTIL=$(($tx_delta/$DELAY))
+}
+
+show_util() {
+	echo -n "${LB_ACTION_RECONNECT}${LB_ACTION_DISCONNECT}${PRINT_NAME}${LB_ACTION_END}${LB_ACTION_END}"
+	echo -n " (↓"
+	human_readable_size_conv $RX_UTIL 2
+	echo -n "/s | ↑"
+	human_readable_size_conv $TX_UTIL 2
+	echo "/s)"
+}
+
+process() {
+	# Get default route interfaces
+	: ${IFACE=$(route_get_nics default)}
+
+	IFS=:
+	IFACE_ARR=($IFACE)
+	unset IFS
+
+	check_nics
+	case $? in
+		1 ) status_conn_err 'x';;
+		2 ) status_conn_err '!';;
+	esac
+
+	if check_for_wireless; then
+		obtain_wireless_name || status_err "${LB_ACTION_RECONNECT}${LB_COL_RED}[*]${LB_COL_WHITE} ${LB_COL_YELLOW}${IFACE}${LB_ACTION_END}"
 	else
-		PRINT_STAR=1
+		PRINT_NAME="${LB_COL_YELLOW}$IFACE${LB_COL_WHITE}"
 	fi
-#else
-# non-wireless
-fi
 
-if [ -z $PRINT_STAR ]; then
-	PRINT_SPEED=1
+	obtain_util
+	show_util
+}
 
-	read -r RX_BEG < "$INTERFACE_STAT_DIR/rx_bytes"
-	read -r TX_BEG < "$INTERFACE_STAT_DIR/tx_bytes"
+usage() {
+	echo "$USAGE_STR" >&2
+	exit ${1:-1}
+}
 
-	TBEG=${TBEG/.}
-	TEND=${TEND/.}
-	sleep ${SLEEP_TIME}
+arg_parse() {
+	local delay_regex='[1-9][0-9]*'
+	local optstring="hwpi:d:"
+	local optstring_long="help,wired,polybar,interface:,delay:"
+	local optval
 
-	read -r RX_NOW < "$INTERFACE_STAT_DIR/rx_bytes"
-	read -r TX_NOW < "$INTERFACE_STAT_DIR/tx_bytes"
+	optval=`getopt -o "$optstring" --long "$optstring_long" -n "$0" -- "$@"` || usage 1
+	eval set -- "$optval"
 
-	RX_SPEED=$(((RX_NOW-RX_BEG)/SLEEP_TIME))
-	TX_SPEED=$(((TX_NOW-TX_BEG)/SLEEP_TIME))
+	unset NO_WIRELESS DO_FORMAT IFACE
+	DELAY=$DEFAULT_DELAY
+	while test -n "$1"; do
+		case "$1" in
+			-h|--help )
+				usage 1
+				;;
+			-w|--wired )
+				NO_WIRELESS=1
+				;;
+			-p|--polybar )
+				DO_FORMAT=1
+				;;
+			-i|--interface )
+				IFACE=${2:-' '}
+				shift
+				;;
+			-d|--delay )
+				DELAY=$2
+				expr "$DELAY" : "$delay_regex" >/dev/null || die "-d: invalid delay"
+				shift
+				;;
+		esac
+		shift
+	done
 
-else
-	printf "[*] "
-	sleep ${SLEEP_TIME}
-fi
+	LB_COL_YELLOW=${DO_FORMAT:+"%{F#ffff63}"}
+	LB_COL_RED=${DO_FORMAT:+"%{F#c72121}"}
+	LB_COL_LIGHTBLUE=${DO_FORMAT:+"%{F#5bd6de}"}
+	LB_COL_WHITE=${DO_FORMAT:+"%{F#FF}"}
 
-printf "$PRINT_NAME"
+	LB_ACTION_RECONNECT=${DO_FORMAT:+"%{A1:$HOME/bin/net-reconnect-sudo:}"}
+	LB_ACTION_DISCONNECT=${DO_FORMAT:+"%{A3:$HOME/bin/net-disconnect-sudo:}"}
+	LB_ACTION_END=${DO_FORMAT:+"%{A}"}
 
-if [ -n $PRINT_SPEED ]; then
-	printf " (↓"; humanReadableSizeConv $RX_SPEED 2 $SIZE_PREFIX; printf "/s | ↑"; humanReadableSizeConv $TX_SPEED 2 $SIZE_PREFIX; printf "/s)"
-fi
+}
 
-printf "\n"
-
-
-
-
-
-
+arg_parse "$@"
+process
